@@ -11,7 +11,7 @@ It will:
 
 import rospy
 import tf
-from car_demo.msg import Control, TrafficLightStatus
+from car_demo.msg import Control, TrafficLightStatus, LaneCoefficients
 import numpy as np
 from sensor_msgs.msg import JointState, Image
 import message_filters
@@ -19,6 +19,7 @@ import std_msgs.msg
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
 from simulation_image_helper import SimulationImageHelper
+from spurerkennung import spurerkennung
 
 
 class ImageHandler:
@@ -34,7 +35,7 @@ class ImageHandler:
         self.imageSub = rospy.Subscriber(
             "/prius/front_camera/image_raw", Image, self.imageCallback, queue_size=1
         )
-        # The queue_size in the last line is really important! The code here is not thread-safe, so
+        # The queue_size in the lLaneCoefficientsast line is really important! The code here is not thread-safe, so
         # - by all cost - you have to avoid that the callback function is called multiple times in parallel.
 
         # publishers
@@ -42,23 +43,36 @@ class ImageHandler:
             "lane_detection_dbg_image", Image, queue_size=1
         )
 
+        self.pubLaneCoeffs = rospy.Publisher(
+            "lane_coeffs", LaneCoefficients, queue_size=1
+        )        
+
     def imageCallback(self, message):
         try:
             cv_image = self.bridge.imgmsg_to_cv2(message, "mono8")
         except CvBridgeError as e:
             rospy.logerr("Error in imageCallback: %s", e)
 
-        # generate color image and draw box on road
-        cv_image_color = cv2.cvtColor(cv_image, cv2.COLOR_GRAY2BGR)
 
-        box_road = np.array([[20, -5], [20, +5], [5, +5], [5, -5]])
-        box_image = self.imageHelper.road2image(box_road)
-        cv2.polylines(
-            cv_image_color,
-            [box_image.astype(np.int32)],
-            isClosed=True,
-            color=(0, 0, 255),
-            thickness=8,
+        self.Z_opt, cv_image_color = spurerkennung(cv_image)
+
+        
+        # send lane coeffs
+        coeffs = LaneCoefficients()
+        coeffs.header = std_msgs.msg.Header()
+        coeffs.header.stamp = message.header.stamp  # time stamp of input data
+        coeffs.header.frame_id = "din70000"
+        coeffs.W = self.Z_opt[0]
+        coeffs.Y_offset = self.Z_opt[1]
+        coeffs.dPhi = self.Z_opt[2]
+        coeffs.c0 = self.Z_opt[3]
+
+        self.pubLaneCoeffs.publish(coeffs)
+
+        rospy.logdebug(
+            "published lane coefficients at stamp %i %i",
+            coeffs.header.stamp.secs,
+            coeffs.header.stamp.nsecs,
         )
 
         # downscale to reduce load
@@ -124,6 +138,7 @@ if __name__ == "__main__":
             time_start = time_now
 
         # get vehicle position data
+        """""
         try:
             (trans, rot) = tf_listener.lookupTransform(
                 "map", "din70000", rospy.Time(0)
@@ -168,6 +183,7 @@ if __name__ == "__main__":
         else:
             throttle_desired = -0.5
         rospy.loginfo("throttle = " + str(throttle_desired))
+        
 
         # send driving commands to vehicle
         command = Control()
@@ -180,5 +196,5 @@ if __name__ == "__main__":
             command.throttle, command.brake = 0, np.clip(-throttle_desired, 0, 1)
         command.steer = 0.5
         pub_control.publish(command)
-
+        """""
         rate.sleep()
